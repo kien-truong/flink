@@ -17,10 +17,9 @@
 
 package org.apache.flink.contrib.streaming;
 
-import java.util.ArrayDeque;
-import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -46,7 +45,8 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	private TypeInformation outputType;
 	private int poolSize;
 	private transient ExecutorService pool;
-	private transient Queue<Future<Boolean>> futureResults;
+	private transient ExecutorCompletionService<Boolean> poolWatcher;
+	private int freeThread;
 
 	private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedFlatMapFunction.class);
 
@@ -66,8 +66,9 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		super.open(parameters);
 		if (pool == null) {
 			LOG.debug("Initializing thread pool with {} threads", poolSize);
-			futureResults = new ArrayDeque<>(poolSize);
+			freeThread = poolSize;
 			pool = Executors.newFixedThreadPool(poolSize);
+			poolWatcher = new ExecutorCompletionService<>(pool);
 		}
 	}
 
@@ -77,22 +78,20 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		if (pool != null) {
 			LOG.debug("Shutting down thread pool");
 			pool.shutdown();
-			while (!futureResults.isEmpty()) {
+			while (freeThread < poolSize) {
 				processResult();
 			}
 			pool = null;
-			futureResults = null;
+			poolWatcher = null;
 		}
 	}
 
 	@Override
 	public void flatMap(T value, Collector<O> out) throws Exception {
-		Future<Boolean> ret = pool.submit(new ThreadWorker<>(value, out, udf));
-		futureResults.add(ret);
+		poolWatcher.submit(new ThreadWorker<>(value, out, udf));
+		freeThread--;
 
-		if (futureResults.size() == poolSize) {
-			// Would be much more elegant to use CompletableFuture,
-			// but Java 7 doesn't have that
+		if (freeThread == 0) {
 			processResult();
 		}
 	}
@@ -103,10 +102,8 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	 * @throws InterruptedException
 	 */
 	private void processResult() throws InterruptedException {
-		Future<Boolean> firstResult = futureResults.poll();
-		if (firstResult == null) {
-			return;
-		}
+		Future<Boolean> firstResult = poolWatcher.take();
+		freeThread++;
 		try {
 			firstResult.get();
 		} catch (ExecutionException e) {
