@@ -17,6 +17,11 @@
 
 package org.apache.flink.contrib.streaming;
 
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
@@ -26,10 +31,16 @@ import java.util.concurrent.Future;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.ClosureCleaner;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.state.CheckpointListener;
+import org.apache.flink.runtime.util.DataInputDeserializer;
+import org.apache.flink.runtime.util.DataOutputSerializer;
+import org.apache.flink.streaming.api.checkpoint.Checkpointed;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,21 +50,28 @@ import org.slf4j.LoggerFactory;
  * Supplying an asynchronous FlatMapFunction will result in undefined behaviour/missing output
  */
 public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O>
-		implements ResultTypeQueryable {
+		implements ResultTypeQueryable, CheckpointListener, Checkpointed {
 
 	private FlatMapFunction<T, O> udf;
 	private TypeInformation outputType;
 	private int poolSize;
 	private transient ExecutorService pool;
-	private transient ExecutorCompletionService<Boolean> poolWatcher;
+	private transient ExecutorCompletionService<Tuple2<List<O>, Long>> poolWatcher;
+	private transient Collector<O> collector;
 	private int freeThread;
+	private long udfIdCnt;
+	private HashMap<Long, T> idsInFlight;
+	private TypeInformation<T> inputType;
+	private boolean restoring = false;
 
 	private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedFlatMapFunction.class);
 
 	public MultiThreadedFlatMapFunction(FlatMapFunction<T, O> udf, TypeInformation<T> inputType, int poolSize) {
 		this.udf = udf;
 		this.pool = null;
+		this.collector = null;
 		this.poolSize = poolSize;
+		this.inputType = inputType;
 
 		// Clean the udf function so it's serializable
 		ClosureCleaner.clean(udf, true);
@@ -66,7 +84,10 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		super.open(parameters);
 		if (pool == null) {
 			LOG.debug("Initializing thread pool with {} threads", poolSize);
+			collector = null;
 			freeThread = poolSize;
+			udfIdCnt = 0;
+			idsInFlight = new HashMap<>(poolSize);
 			pool = Executors.newFixedThreadPool(poolSize);
 			poolWatcher = new ExecutorCompletionService<>(pool);
 		}
@@ -83,15 +104,39 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			}
 			pool = null;
 			poolWatcher = null;
+			udfIdCnt = 0;
+			collector = null;
 		}
 	}
 
 	@Override
 	public void flatMap(T value, Collector<O> out) throws Exception {
-		poolWatcher.submit(new ThreadWorker<>(value, out, udf));
+		if (collector == null) {
+			LOG.debug("Collector is set");
+			collector = out;
+		} else if (collector != out) {
+			throw new Exception(
+				"Collector cannot be changed when using MultiThreadFlatMapFunction due to checkpoint support. " +
+				"Do not reuse a MultiThreadFlatMapFunction object for many transformation. "
+			);
+		}
+
+		if (restoring) {
+			for(Map.Entry<Long, T> entry: idsInFlight.entrySet()) {
+				poolWatcher.submit(new ThreadWorker<>(entry.getValue(), udf, entry.getKey()));
+				freeThread--;
+			}
+			restoring = false;
+			LOG.debug("Finish restoring");
+		}
+		poolWatcher.submit(new ThreadWorker<>(value, udf, udfIdCnt));
+		idsInFlight.put(udfIdCnt, value);
+		udfIdCnt++;
 		freeThread--;
 
-		if (freeThread == 0) {
+		// Restoring from snapshot can freeThread go negative,
+		// but since out pool is fixed size it will not overload the system too much
+		while (freeThread <= 0) {
 			processResult();
 		}
 	}
@@ -102,10 +147,16 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	 * @throws InterruptedException
 	 */
 	private void processResult() throws InterruptedException {
-		Future<Boolean> firstResult = poolWatcher.take();
+		Future<Tuple2<List<O>, Long>> firstResult = poolWatcher.take();
 		freeThread++;
 		try {
-			firstResult.get();
+			Tuple2<List<O>, Long> ret = firstResult.get();
+			List<O> elements = ret.f0;
+			long udfId = ret.f1;
+			for (O e : elements) {
+				collector.collect(e);
+			}
+			idsInFlight.remove(udfId);
 		} catch (ExecutionException e) {
 			throw new RuntimeException(e.getCause());
 		}
@@ -116,6 +167,54 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		return outputType;
 	}
 
+	@Override
+	public void notifyCheckpointComplete(long checkpointId) throws Exception {
+		LOG.debug("Checkpoint completed");
+	}
+
+	@Override
+	public Serializable snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+		LOG.debug("Start snapshotting");
+		// Need to store
+		// 1. udfIdCnt
+		// 2. idsInFlight
+		TypeSerializer<T> inputSerializer = inputType.createSerializer(getRuntimeContext().getExecutionConfig());
+		int length = inputSerializer.getLength();
+		// Unknown length, allocate 16 byte
+		if (length == -1) {
+			length = 16;
+		}
+		DataOutputSerializer outputEnc = new DataOutputSerializer(8 + 4 + (length + 8) * idsInFlight.size());
+		outputEnc.writeLong(udfIdCnt);
+		LOG.debug("ID counter at: {}", udfIdCnt);
+		outputEnc.writeInt(idsInFlight.size());
+		LOG.debug("Saving {} in-flight inputs", idsInFlight.size());
+		for(Map.Entry<Long, T> entry: idsInFlight.entrySet()) {
+			outputEnc.writeLong(entry.getKey());
+			inputSerializer.serialize(entry.getValue(), outputEnc);
+		}
+		LOG.debug("Finish snapshotting");
+		return outputEnc.getByteArray();
+	}
+
+	@Override
+	public void restoreState(Serializable state) throws Exception {
+		LOG.debug("Start restoring");
+		restoring = true;
+		byte[] input = (byte[]) state;
+		DataInputDeserializer inputDec = new DataInputDeserializer(input, 0, input.length);
+		TypeSerializer<T> inputSerializer = inputType.createSerializer(getRuntimeContext().getExecutionConfig());
+		udfIdCnt = inputDec.readLong();
+		LOG.debug("ID counter set to: {}", udfIdCnt);
+		int mapSize = inputDec.readInt();
+		LOG.debug("Reading {} saved input", mapSize);
+		for (int i = 0; i < mapSize; i++) {
+			long id = inputDec.readLong();
+			T item = inputSerializer.deserialize(inputDec);
+			idsInFlight.put(id, item);
+		}
+		// The restore is not complete yet, it will be continued when flatMap is called and collector is set
+	}
 }
 
 /**
@@ -124,27 +223,27 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
  * @param <T>
  * @param <O>
  */
-class ThreadWorker<T, O> implements Callable<Boolean> {
+class ThreadWorker<T, O> implements Callable<Tuple2<List<O>, Long>> {
 
 	private final T input;
-	private final Collector<O> collector;
 	private final FlatMapFunction<T, O> udf;
+	private final long id;
 
-	ThreadWorker(T input, Collector<O> collector, FlatMapFunction<T, O> udf) {
+	ThreadWorker(T input, FlatMapFunction<T, O> udf, long id) {
 		this.input = input;
-		this.collector = collector;
 		this.udf = udf;
+		this.id = id;
 	}
 
 	@Override
-	public Boolean call() throws Exception {
-		Collector<O> myCollector = new ThreadCollector<>(collector);
+	public Tuple2<List<O>, Long> call() throws Exception {
+		ThreadCollector<O> myCollector = new ThreadCollector<>();
 		udf.flatMap(input, myCollector);
 		// Assuming that the udf.flatmap is synchronous
 		// ThreadCollector will ignore items after it's closed
-		// Close the thread collector to flush the buffer
 		myCollector.close();
-		return true;
+
+		return new Tuple2<>(myCollector.getBuffer(), id);
 	}
 }
 
@@ -156,17 +255,10 @@ class ThreadWorker<T, O> implements Callable<Boolean> {
  */
 class ThreadCollector<O> implements Collector<O> {
 
-	private static final int BUFFER_SIZE = 32;
-	private final Collector<O> parent;
-	private int bufSize;
 	private Boolean closed;
+	private List<O> buffer = new ArrayList<>(32);
 
-	@SuppressWarnings("unchecked")
-	private O[] buffer = (O[]) new Object[BUFFER_SIZE];
-
-	ThreadCollector(Collector<O> collector) {
-		parent = collector;
-		bufSize = 0;
+	ThreadCollector() {
 		closed = false;
 	}
 
@@ -175,31 +267,15 @@ class ThreadCollector<O> implements Collector<O> {
 		if (closed) {
 			return;
 		}
-		buffer[bufSize] = o;
-		bufSize++;
-		if (bufSize == BUFFER_SIZE) {
-			flush();
-		}
+		buffer.add(o);
 	}
 
 	@Override
 	public void close() {
 		closed = true;
-		if (bufSize > 0) {
-			flush();
-		}
 	}
 
-	/**
-	 * Flush the buffer, called when buffer is full or the collector is close
-	 */
-	private void flush() {
-		synchronized (parent) {
-			for (int i = 0; i < bufSize; i++) {
-				O item = buffer[i];
-				parent.collect(item);
-			}
-		}
-		bufSize = 0;
+	List<O> getBuffer() {
+		return buffer;
 	}
 }
