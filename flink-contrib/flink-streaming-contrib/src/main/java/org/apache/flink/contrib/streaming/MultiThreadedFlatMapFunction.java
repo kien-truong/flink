@@ -52,17 +52,17 @@ import org.slf4j.LoggerFactory;
 public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O>
 		implements ResultTypeQueryable, CheckpointListener, Checkpointed {
 
-	private FlatMapFunction<T, O> udf;
-	private TypeInformation outputType;
-	private int poolSize;
+	private final FlatMapFunction<T, O> udf;
+	private final TypeInformation outputType;
+	private final TypeInformation<T> inputType;
+	private final int poolSize;
 	private transient ExecutorService pool;
 	private transient ExecutorCompletionService<Tuple2<List<O>, Long>> poolWatcher;
 	private transient Collector<O> collector;
-	private int freeThread;
-	private long udfIdCnt;
-	private HashMap<Long, T> idsInFlight;
-	private TypeInformation<T> inputType;
-	private boolean restoring = false;
+	private transient HashMap<Long, T> idsInFlight;
+	private transient int freeThread;
+	private transient long udfIdCnt;
+	private transient boolean restoring;
 
 	private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedFlatMapFunction.class);
 
@@ -87,6 +87,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			collector = null;
 			freeThread = poolSize;
 			udfIdCnt = 0;
+			restoring = false;
 			idsInFlight = new HashMap<>(poolSize);
 			pool = Executors.newFixedThreadPool(poolSize);
 			poolWatcher = new ExecutorCompletionService<>(pool);
