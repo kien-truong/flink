@@ -17,7 +17,6 @@
 
 package org.apache.flink.contrib.streaming;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -50,19 +49,19 @@ import org.slf4j.LoggerFactory;
  * Supplying an asynchronous FlatMapFunction will result in undefined behaviour/missing output
  */
 public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O>
-		implements ResultTypeQueryable, CheckpointListener, Checkpointed {
+		implements ResultTypeQueryable, CheckpointListener, Checkpointed<byte[]> {
 
 	private final FlatMapFunction<T, O> udf;
 	private final TypeInformation outputType;
 	private final TypeInformation<T> inputType;
 	private final int poolSize;
+	private boolean restoring = false;
 	private transient ExecutorService pool;
 	private transient ExecutorCompletionService<Tuple2<List<O>, Long>> poolWatcher;
 	private transient Collector<O> collector;
 	private transient HashMap<Long, T> idsInFlight;
 	private transient int freeThread;
 	private transient long udfIdCnt;
-	private transient boolean restoring;
 
 	private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedFlatMapFunction.class);
 
@@ -86,11 +85,12 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			LOG.debug("Initializing thread pool with {} threads", poolSize);
 			collector = null;
 			freeThread = poolSize;
-			udfIdCnt = 0;
-			restoring = false;
-			idsInFlight = new HashMap<>(poolSize);
 			pool = Executors.newFixedThreadPool(poolSize);
 			poolWatcher = new ExecutorCompletionService<>(pool);
+			if (!restoring) {
+				udfIdCnt = 0;
+				idsInFlight = new HashMap<>(poolSize);
+			}
 		}
 	}
 
@@ -123,6 +123,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		}
 
 		if (restoring) {
+			LOG.debug("Start processing checkpointed value");
 			for(Map.Entry<Long, T> entry: idsInFlight.entrySet()) {
 				poolWatcher.submit(new ThreadWorker<>(entry.getValue(), udf, entry.getKey()));
 				freeThread--;
@@ -174,7 +175,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	}
 
 	@Override
-	public Serializable snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
+	public byte[] snapshotState(long checkpointId, long checkpointTimestamp) throws Exception {
 		LOG.debug("Start snapshotting");
 		// Need to store
 		// 1. udfIdCnt
@@ -199,11 +200,11 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	}
 
 	@Override
-	public void restoreState(Serializable state) throws Exception {
+	public void restoreState(byte[] state) throws Exception {
 		LOG.debug("Start restoring");
 		restoring = true;
-		byte[] input = (byte[]) state;
-		DataInputDeserializer inputDec = new DataInputDeserializer(input, 0, input.length);
+		idsInFlight = new HashMap<>(poolSize);
+		DataInputDeserializer inputDec = new DataInputDeserializer(state, 0, state.length);
 		TypeSerializer<T> inputSerializer = inputType.createSerializer(getRuntimeContext().getExecutionConfig());
 		udfIdCnt = inputDec.readLong();
 		LOG.debug("ID counter set to: {}", udfIdCnt);
