@@ -41,7 +41,7 @@ import static org.junit.Assert.assertEquals;
 /**
  * Test case for MultiThreadedFlatMapFunction
  */
-public class MTFlatMapTest extends MTFlatMapTestBase {
+public class MTFlatMapBasicTest extends MTFlatMapTestBase {
 
 	@Test
 	public void testThreadUsage() throws IOException {
