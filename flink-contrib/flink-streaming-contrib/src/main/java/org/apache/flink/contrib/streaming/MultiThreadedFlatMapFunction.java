@@ -101,7 +101,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			LOG.debug("Shutting down thread pool");
 			pool.shutdown();
 			while (freeThread < poolSize) {
-				processResult();
+				processResult(true);
 			}
 			pool = null;
 			poolWatcher = null;
@@ -139,17 +139,31 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		// Restoring from snapshot can freeThread go negative,
 		// but since out pool is fixed size it will not overload the system too much
 		while (freeThread <= 0) {
-			processResult();
+			processResult(true);
+		}
+
+		//Try to process more results if available, but do not block waiting for them
+		while(processResult(false)) {
+			// Do nothing
 		}
 	}
 
 	/**
 	 * Process the result of the worker thread to check for exception
+	 * @return true if we have successfully process a result, false if there're no result to process
 	 *
 	 * @throws InterruptedException
 	 */
-	private void processResult() throws InterruptedException {
-		Future<Tuple2<List<O>, Long>> firstResult = poolWatcher.take();
+	private boolean processResult(boolean blocking) throws InterruptedException {
+		Future<Tuple2<List<O>, Long>> firstResult;
+		if (blocking) {
+			firstResult = poolWatcher.take();
+		} else {
+			firstResult = poolWatcher.poll();
+		}
+		if (firstResult == null) {
+			return false;
+		}
 		freeThread++;
 		try {
 			Tuple2<List<O>, Long> ret = firstResult.get();
@@ -159,6 +173,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 				collector.collect(e);
 			}
 			idsInFlight.remove(udfId);
+			return true;
 		} catch (ExecutionException e) {
 			throw new RuntimeException(e.getCause());
 		}
