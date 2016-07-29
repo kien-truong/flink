@@ -26,16 +26,12 @@ import java.util.Map;
 import java.util.Set;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.test.util.ForkableFlinkMiniCluster;
 import org.apache.flink.util.Collector;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -45,26 +41,13 @@ import static org.junit.Assert.assertEquals;
 /**
  * Test case for MultiThreadedFlatMapFunction
  */
-public class MTFlatMapTest {
-
-	private static final ForkableFlinkMiniCluster cluster = new ForkableFlinkMiniCluster(new Configuration(), false);
-
-	@BeforeClass
-	public static void setUpClass() {
-		cluster.start();
-	}
-
-	@AfterClass
-	public static void tearDownClass() {
-		cluster.stop();
-	}
+public class MTFlatMapTest extends MTFlatMapTestBase {
 
 	@Test
 	public void testThreadUsage() throws IOException {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final StreamExecutionEnvironment env = getEnvironment();
 
-		final int N = 10;
+		final int N = 10000;
 		DataStream<Long> stream = env.generateSequence(1, N);
 
 		FlatMapFunction<Long, Tuple2<Long, Long>> func = new FlatMapFunction<Long, Tuple2<Long, Long>>() {
@@ -95,7 +78,7 @@ public class MTFlatMapTest {
 		}
 
 		assertEquals("Wrong number of output", N, itemCount);
-		assertEquals("Wrong number or thread", POOL_SIZE, threadCount.size());
+		assertEquals("Wrong number or thread", POOL_SIZE * PARALLELISM, threadCount.size());
 	}
 
 
@@ -104,8 +87,7 @@ public class MTFlatMapTest {
 
 	@Test
 	public void testExceptionInsideUdf() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final StreamExecutionEnvironment env = getEnvironment();
 
 		final int N = 10;
 		final String exceptionCause = "UDF Exception. Item divisible by 5";
@@ -132,9 +114,12 @@ public class MTFlatMapTest {
 		exception.expect(new BaseMatcher<Throwable>() {
 			@Override
 			public boolean matches(Object item) {
-				// Exception inside UDF is wrap inside 5 other exception
-				Throwable lv1 = (Throwable) item;
-				return lv1.getCause().getCause().getCause().getCause().getMessage().equals(exceptionCause);
+				// Exception inside UDF is wrap inside multiple other exception
+				Throwable exc = (Throwable) item;
+				while(exc.getCause() != null) {
+					exc = exc.getCause();
+				}
+				return exc.getMessage().equals(exceptionCause);
 			}
 
 			@Override
@@ -147,9 +132,8 @@ public class MTFlatMapTest {
 	}
 
 	@Test
-	public void testThreadCollectorBuffer() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+	public void testCorrectNumberOfOutput() throws Exception {
+		final StreamExecutionEnvironment env = getEnvironment();
 
 		final int N = 10;
 		final int multiplier = 100;

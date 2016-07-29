@@ -1,10 +1,8 @@
 package org.apache.flink.contrib.streaming;
 
 import java.util.Random;
-import java.util.concurrent.atomic.AtomicLong;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
-import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.checkpoint.Checkpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -12,10 +10,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
 import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
-import org.apache.flink.test.util.ForkableFlinkMiniCluster;
 import org.apache.flink.util.Collector;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,36 +20,16 @@ import static org.junit.Assert.assertEquals;
 /**
  * Test to check MultiThreadedFlatMapFunction behaviour with checkpoint
  */
-public class MTFlatMapCheckpointTest {
+public class MTFlatMapCheckpointTest extends MTFlatMapTestBase {
 
-	private static ForkableFlinkMiniCluster cluster;
-	private static final int PARALLELISM = 4;
 	private final static Logger LOG = LoggerFactory.getLogger(MTFlatMapCheckpointTest.class);
-
-	@BeforeClass
-	public static void setUpClass() {
-		Configuration conf = new Configuration();
-		conf.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, 2);
-		conf.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 2);
-		cluster = new ForkableFlinkMiniCluster(conf, false);
-		cluster.start();
-	}
-
-	@AfterClass
-	public static void tearDownClass() {
-		cluster.stop();
-		cluster = null;
-	}
 
 	@Test
 	public void testOutputCountWhenStreamFailed() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.createRemoteEnvironment(
-				"localhost", cluster.getLeaderRPCPort());
+		final StreamExecutionEnvironment env = getEnvironment();
 
 		final long CHECKPOINT_INTERVAL = 500;
 		env.enableCheckpointing(CHECKPOINT_INTERVAL);
-		env.getConfig().disableSysoutLogging();
-		env.setParallelism(PARALLELISM);
 
 		final int N = 1000000 * PARALLELISM;
 		DataStream<Long> stream = env.addSource(new LongSource(N));

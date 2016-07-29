@@ -116,9 +116,10 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			LOG.debug("Collector is set");
 			collector = out;
 		} else if (collector != out) {
-			throw new Exception(
-				"Collector cannot be changed when using MultiThreadFlatMapFunction due to checkpoint support. " +
-				"Do not reuse a MultiThreadFlatMapFunction object for many transformation. "
+			// Cannot triggered this code path in testing, probably due to optimizer
+			// Left this here just in case
+			throw new IllegalAccessException(
+				"Collector cannot be changed when using MultiThreadFlatMapFunction due to checkpoint support. "
 			);
 		}
 
