@@ -65,17 +65,38 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 
 	private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedFlatMapFunction.class);
 
-	public MultiThreadedFlatMapFunction(FlatMapFunction<T, O> udf, TypeInformation<T> inputType, int poolSize) {
+	/**
+	 * @param udf The user-defined function that's used to process the input
+	 * @param inputType The type of the input stream
+	 * @param poolSize The size of the thread pool to use
+	 * @param cleanUdf Set this to false to disable the usage of ClosureCleaner to clean the user-defined function.
+	 */
+	public MultiThreadedFlatMapFunction(
+			FlatMapFunction<T, O> udf, TypeInformation<T> inputType, int poolSize, boolean cleanUdf) {
 		this.udf = udf;
 		this.pool = null;
 		this.collector = null;
 		this.poolSize = poolSize;
 		this.inputType = inputType;
 
-		// Clean the udf function so it's serializable
-		ClosureCleaner.clean(udf, true);
+		if (cleanUdf) {
+			// Clean the udf function so it's serializable
+			ClosureCleaner.clean(udf, true);
+		} else {
+			ClosureCleaner.ensureSerializable(udf);
+		}
+
 
 		this.outputType = TypeExtractor.getFlatMapReturnTypes(udf, inputType);
+	}
+
+	/**
+	 * @param udf The user-defined function that's used to process the input.
+	 * @param inputType The type of the input stream
+	 * @param poolSize The size of the thread pool to use
+	 */
+	public MultiThreadedFlatMapFunction(FlatMapFunction<T, O> udf, TypeInformation<T> inputType, int poolSize) {
+		this(udf, inputType, poolSize, true);
 	}
 
 	@Override
