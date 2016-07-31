@@ -28,10 +28,10 @@ public class MTFlatMapCheckpointTest extends MTFlatMapTestBase {
 	public void testOutputCountWhenStreamFailed() throws Exception {
 		final StreamExecutionEnvironment env = getEnvironment();
 
-		final long CHECKPOINT_INTERVAL = 500;
+		final long CHECKPOINT_INTERVAL = 1000;
 		env.enableCheckpointing(CHECKPOINT_INTERVAL);
 
-		final int N = 1000000 * PARALLELISM;
+		final int N = 300000 * PARALLELISM;
 		DataStream<Long> stream = env.addSource(new LongSource(N));
 
 		FlatMapFunction<Long, Long> func = new FlatMapFunction<Long, Long>() {
@@ -45,7 +45,7 @@ public class MTFlatMapCheckpointTest extends MTFlatMapTestBase {
 		MultiThreadedFlatMapFunction<Long, Long> mtFunc =
 				new MultiThreadedFlatMapFunction<>(func, stream.getType(), POOL_SIZE);
 
-		DataStream<Long> out = stream.flatMap(mtFunc).map(new FailureGenerator(400000, 700000));
+		DataStream<Long> out = stream.flatMap(mtFunc).map(new FailureGenerator(200000, 300000));
 		out.addSink(new OutputCounterSink());
 
 		env.execute();
