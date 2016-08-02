@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import org.apache.flink.api.common.functions.AbstractRichFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -108,6 +109,10 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			freeThread = poolSize;
 			pool = Executors.newFixedThreadPool(poolSize);
 			poolWatcher = new ExecutorCompletionService<>(pool);
+			if (udf instanceof AbstractRichFunction) {
+				((AbstractRichFunction) udf).setRuntimeContext(getRuntimeContext());
+				((AbstractRichFunction) udf).open(parameters);
+			}
 			if (!restoring) {
 				udfIdCnt = 0;
 				idsInFlight = new HashMap<>(poolSize);
@@ -128,6 +133,9 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			poolWatcher = null;
 			udfIdCnt = 0;
 			collector = null;
+			if (udf instanceof AbstractRichFunction) {
+				((AbstractRichFunction) udf).close();
+			}
 		}
 	}
 
