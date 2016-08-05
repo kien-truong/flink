@@ -25,7 +25,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
@@ -37,6 +39,8 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 /**
  * Test case for MultiThreadedFlatMapFunction
@@ -163,5 +167,62 @@ public class MTFlatMapBasicTest extends MTFlatMapTestBase {
 		}
 
 		assertEquals("Wrong number of output", N * multiplier, output.size());
+	}
+
+	@Test
+	public void testRichFlatMapUdf() throws Exception {
+		final StreamExecutionEnvironment env = getEnvironment();
+
+		final int N = 10 * PARALLELISM;
+		DataStream<Long> stream = env.generateSequence(1, N);
+
+		RichIdentityFlatMapUDF func = new RichIdentityFlatMapUDF();
+
+		final int POOL_SIZE = 3;
+		MultiThreadedFlatMapFunction<Long, Long> mtFunc =
+				new MultiThreadedFlatMapFunction<>(func, stream.getType(), POOL_SIZE);
+
+		DataStream<Long> threadIdStream = stream.flatMap(mtFunc);
+
+		Iterator<Long> iterator = DataStreamUtils.collect(threadIdStream);
+
+		Set<Long> output = new HashSet<>(N);
+		while(iterator.hasNext()) {
+			output.add(iterator.next());
+		}
+
+		assertEquals("Wrong number of output", N, output.size());
+		for(int i = 0; i < PARALLELISM; i++) {
+			assertTrue("Rich UDF for task " + i + "is not open", RichIdentityFlatMapUDF.isOpen[i]);
+			assertTrue("Rich UDF for task " + i + " is not close", RichIdentityFlatMapUDF.isClosed[i]);
+		}
+	}
+
+	private static class RichIdentityFlatMapUDF extends RichFlatMapFunction<Long, Long> {
+		static boolean[] isOpen = new boolean[PARALLELISM];
+		static boolean[] isClosed = new boolean[PARALLELISM];
+
+		@Override
+		public void open(Configuration parameters) throws Exception {
+			super.open(parameters);
+			isOpen[getRuntimeContext().getIndexOfThisSubtask()] = true;
+		}
+
+		@Override
+		public void close() throws Exception {
+			super.close();
+			isClosed[getRuntimeContext().getIndexOfThisSubtask()] = true;
+		}
+
+		@Override
+		public void flatMap(Long value, Collector<Long> out) throws Exception {
+			if (!isOpen[getRuntimeContext().getIndexOfThisSubtask()]) {
+				throw new Exception("UDF is not open");
+			}
+			if (isClosed[getRuntimeContext().getIndexOfThisSubtask()]) {
+				throw new Exception("UDF is closed");
+			}
+			out.collect(value);
+		}
 	}
 }
