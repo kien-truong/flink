@@ -190,9 +190,9 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 			firstResult = poolWatcher.take();
 		} else {
 			firstResult = poolWatcher.poll();
-		}
-		if (firstResult == null) {
-			return false;
+			if (firstResult == null) {
+				return false;
+			}
 		}
 		freeThread++;
 		try {
