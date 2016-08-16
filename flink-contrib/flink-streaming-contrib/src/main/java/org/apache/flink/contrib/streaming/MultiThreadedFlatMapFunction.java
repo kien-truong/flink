@@ -147,7 +147,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		} else if (collector != out) {
 			// Cannot triggered this code path in testing, probably due to optimizer
 			// Left this here just in case
-			throw new IllegalAccessException(
+			throw new IllegalArgumentException(
 				"Collector cannot be changed when using MultiThreadFlatMapFunction due to checkpoint support. "
 			);
 		}
