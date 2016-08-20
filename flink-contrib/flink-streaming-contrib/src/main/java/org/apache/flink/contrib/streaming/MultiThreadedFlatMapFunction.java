@@ -302,7 +302,7 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 	private static class ThreadCollector<O> implements Collector<O> {
 
 		private Boolean closed;
-		private List<O> buffer = new ArrayList<>(32);
+		private List<O> buffer = new ArrayList<>();
 
 		ThreadCollector() {
 			closed = false;
