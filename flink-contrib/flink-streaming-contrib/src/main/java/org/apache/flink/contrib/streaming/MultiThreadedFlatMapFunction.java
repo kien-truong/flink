@@ -262,67 +262,67 @@ public class MultiThreadedFlatMapFunction<T, O> extends RichFlatMapFunction<T, O
 		}
 		// The restore is not complete yet, it will be continued when flatMap is called and collector is set
 	}
-}
 
-/**
- * Worker thread to run the user-defined FlatMapFunction
- *
- * @param <T>
- * @param <O>
- */
-class ThreadWorker<T, O> implements Callable<Tuple2<List<O>, Long>> {
+	/**
+	 * Worker thread to run the user-defined FlatMapFunction
+	 *
+	 * @param <T>
+	 * @param <O>
+	 */
+	private static class ThreadWorker<T, O> implements Callable<Tuple2<List<O>, Long>> {
 
-	private final T input;
-	private final FlatMapFunction<T, O> udf;
-	private final long id;
+		private final T input;
+		private final FlatMapFunction<T, O> udf;
+		private final long id;
 
-	ThreadWorker(T input, FlatMapFunction<T, O> udf, long id) {
-		this.input = input;
-		this.udf = udf;
-		this.id = id;
-	}
-
-	@Override
-	public Tuple2<List<O>, Long> call() throws Exception {
-		ThreadCollector<O> myCollector = new ThreadCollector<>();
-		udf.flatMap(input, myCollector);
-		// Assuming that the udf.flatmap is synchronous
-		// ThreadCollector will ignore items after it's closed
-		myCollector.close();
-
-		return new Tuple2<>(myCollector.getBuffer(), id);
-	}
-}
-
-/**
- * Temporary collector to buffer the output of the user-defined FlatMapFunction
- * This helps to avoid excessive locking on the global collector
- *
- * @param <O>
- */
-class ThreadCollector<O> implements Collector<O> {
-
-	private Boolean closed;
-	private List<O> buffer = new ArrayList<>(32);
-
-	ThreadCollector() {
-		closed = false;
-	}
-
-	@Override
-	public void collect(O o) {
-		if (closed) {
-			return;
+		ThreadWorker(T input, FlatMapFunction<T, O> udf, long id) {
+			this.input = input;
+			this.udf = udf;
+			this.id = id;
 		}
-		buffer.add(o);
+
+		@Override
+		public Tuple2<List<O>, Long> call() throws Exception {
+			ThreadCollector<O> myCollector = new ThreadCollector<>();
+			udf.flatMap(input, myCollector);
+			// Assuming that the udf.flatmap is synchronous
+			// ThreadCollector will ignore items after it's closed
+			myCollector.close();
+
+			return new Tuple2<>(myCollector.getBuffer(), id);
+		}
 	}
 
-	@Override
-	public void close() {
-		closed = true;
-	}
+	/**
+	 * Temporary collector to buffer the output of the user-defined FlatMapFunction
+	 * This helps to avoid excessive locking on the global collector
+	 *
+	 * @param <O>
+	 */
+	private static class ThreadCollector<O> implements Collector<O> {
 
-	List<O> getBuffer() {
-		return buffer;
+		private Boolean closed;
+		private List<O> buffer = new ArrayList<>(32);
+
+		ThreadCollector() {
+			closed = false;
+		}
+
+		@Override
+		public void collect(O o) {
+			if (closed) {
+				return;
+			}
+			buffer.add(o);
+		}
+
+		@Override
+		public void close() {
+			closed = true;
+		}
+
+		List<O> getBuffer() {
+			return buffer;
+		}
 	}
 }
