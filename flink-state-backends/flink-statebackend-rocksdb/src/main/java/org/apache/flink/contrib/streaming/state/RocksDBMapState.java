@@ -42,6 +42,7 @@ import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 
@@ -202,11 +203,38 @@ public class RocksDBMapState<K, N, UK, UV>
 	@Override
 	public void clear() {
 		try {
-			Iterator<Map.Entry<UK, UV>> iterator = iterator();
-
-			while (iterator.hasNext()) {
-				iterator.next();
-				iterator.remove();
+			// Get the current prefix
+			final byte[] prefixBytes = serializeCurrentKeyAndNamespace();
+			// Increment prefix by the minimum amount
+			final byte[] nextPrefixBytes = Arrays.copyOf(prefixBytes, prefixBytes.length);
+			boolean overflow = false;
+			for (int i = nextPrefixBytes.length - 1; i >= 0; i--) {
+				final int current = Byte.toUnsignedInt(nextPrefixBytes[i]);
+				if (current != 0xff) {
+					nextPrefixBytes[i] = (byte) (nextPrefixBytes[i] + 1);
+					break;
+				}
+				nextPrefixBytes[i] = 0;
+				if (i == 0) {
+					overflow = true;
+				}
+			}
+			if (!overflow) {
+				backend.db.deleteRange(columnFamily, writeOptions, prefixBytes, nextPrefixBytes);
+			} else {
+				// The prefix is a run of 0xff, fallback to find the last key by iteration
+				Iterator<Map.Entry<UK, UV>> iterator = iterator();
+				byte[] lastKey = null;
+				while (iterator.hasNext()) {
+					RocksDBMapEntry entry = (RocksDBMapEntry) iterator.next();
+					lastKey = entry.rawKeyBytes;
+				}
+				if (lastKey != null) {
+					// Delete the last key
+					backend.db.delete(columnFamily, writeOptions, lastKey);
+					// Delete all keys in [prefixBytes; lastKey)
+					backend.db.deleteRange(columnFamily, writeOptions, prefixBytes, lastKey);
+				}
 			}
 		} catch (Exception e) {
 			LOG.warn("Error while cleaning the state.", e);
